@@ -44,6 +44,7 @@ impl PopupManager {
             config.geometry.width,
             position,
             config.geometry.max_visible,
+            &config.general.monitor,
         );
 
         info!(
@@ -198,13 +199,28 @@ impl PopupManager {
                 }
             }
             X11Event::ButtonPress(e) => {
-                // Click to dismiss
                 if let Some(&id) = self.window_to_notification.get(&e.event) {
-                    info!("Click on notification {} - dismissing", id);
-                    self.close_notification(id, CloseReason::Dismissed)?;
+                    // Check if click hit an action button
+                    if let Some(popup) = self.popups.get(&id) {
+                        // Convert root coordinates to window coordinates for action click check
+                        let action_key = popup.check_action_click(e.event_x as i32, e.event_y as i32);
 
-                    // Notify daemon
-                    let _ = self.event_tx.try_send(PopupEvent::Dismissed(id));
+                        if let Some(key) = action_key {
+                            info!("Action '{}' invoked on notification {}", key, id);
+                            // Notify daemon of action
+                            let _ = self.event_tx.try_send(PopupEvent::ActionInvoked { id, action_key: key });
+
+                            // Close notification unless it's resident
+                            if !popup.notification().hints.resident {
+                                self.close_notification(id, CloseReason::Dismissed)?;
+                            }
+                        } else {
+                            // Click outside action buttons - dismiss
+                            info!("Click on notification {} - dismissing", id);
+                            self.close_notification(id, CloseReason::Dismissed)?;
+                            let _ = self.event_tx.try_send(PopupEvent::Dismissed(id));
+                        }
+                    }
                 }
             }
             X11Event::EnterNotify(e) => {
@@ -218,6 +234,22 @@ impl PopupManager {
                 if let Some(&id) = self.window_to_notification.get(&e.event) {
                     if let Some(popup) = self.popups.get_mut(&id) {
                         popup.on_leave();
+                        // Re-render to clear hover effects
+                        if let Err(e) = popup.render() {
+                            warn!("Failed to re-render on leave: {}", e);
+                        }
+                    }
+                }
+            }
+            X11Event::MotionNotify(e) => {
+                if let Some(&id) = self.window_to_notification.get(&e.event) {
+                    if let Some(popup) = self.popups.get_mut(&id) {
+                        // Update hover state, re-render if changed
+                        if popup.on_motion(e.event_x as i32, e.event_y as i32) {
+                            if let Err(err) = popup.render() {
+                                warn!("Failed to re-render on motion: {}", err);
+                            }
+                        }
                     }
                 }
             }
