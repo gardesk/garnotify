@@ -48,6 +48,7 @@ thiserror = "1.0"
 # Utilities
 dirs = "5.0"
 shellexpand = "3.0"
+regex = "1.10"
 
 # Icon loading
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

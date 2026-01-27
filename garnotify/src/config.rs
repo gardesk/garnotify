@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::rules::Rule;
+
 /// Get the default configuration file path
 fn config_path() -> PathBuf {
     dirs::config_dir()
@@ -22,6 +24,9 @@ pub struct Config {
     pub appearance: AppearanceConfig,
     pub animation: AnimationConfig,
     pub history: HistoryConfig,
+    /// Notification rules (use [[rules]] in TOML)
+    #[serde(rename = "rules", default)]
+    pub rules: Vec<Rule>,
 }
 
 impl Default for Config {
@@ -33,6 +38,7 @@ impl Default for Config {
             appearance: AppearanceConfig::default(),
             animation: AnimationConfig::default(),
             history: HistoryConfig::default(),
+            rules: Vec::new(),
         }
     }
 }

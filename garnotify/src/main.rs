@@ -13,6 +13,7 @@ mod daemon;
 mod dbus;
 mod ipc;
 mod notification;
+mod rules;
 mod ui;
 
 /// garnotify - Notification daemon for gar desktop

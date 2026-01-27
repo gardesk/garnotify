@@ -45,6 +45,7 @@ thiserror = { workspace = true }
 # Utilities
 dirs = { workspace = true }
 shellexpand = { workspace = true }
+regex = { workspace = true }
 
 # Icon loading
 image = { workspace = true }
