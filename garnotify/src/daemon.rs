@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{self, Config};
 use crate::dbus::NotificationsService;
-use crate::ipc::{Command, IpcRequest, IpcServer, Response};
+use crate::ipc::{Command, Event, EventBroadcaster, IpcRequest, IpcServer, Response};
 use crate::notification::{
     new_shared_store, CloseReason, History, Notification, NotificationEvent,
     SharedNotificationStore, UrgencyTimeouts,
@@ -118,6 +118,8 @@ pub struct Daemon {
     config: Arc<Config>,
     ipc_server: IpcServer,
     ipc_rx: Receiver<IpcRequest>,
+    /// Event broadcaster for subscribers
+    broadcaster: EventBroadcaster,
     dbus_service: Option<NotificationsService>,
     notification_store: SharedNotificationStore,
     notification_event_rx: tokio::sync::mpsc::Receiver<NotificationEvent>,
@@ -141,6 +143,7 @@ impl Daemon {
     /// Create a new daemon
     pub fn new(config: Config) -> Result<Self> {
         let (ipc_server, ipc_rx) = IpcServer::new();
+        let broadcaster = ipc_server.broadcaster();
 
         // Create notification event channel
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(100);
@@ -168,6 +171,7 @@ impl Daemon {
             config,
             ipc_server,
             ipc_rx,
+            broadcaster,
             dbus_service: None,
             notification_store,
             notification_event_rx: event_rx,
@@ -405,6 +409,22 @@ impl Daemon {
                     return;
                 }
 
+                // Broadcast event to subscribers
+                self.broadcaster.broadcast(&Event::NotificationNew {
+                    id: notification.id,
+                    app_name: notification.app_name.clone(),
+                    summary: notification.summary.clone(),
+                    body: notification.body.clone(),
+                    urgency: format!("{:?}", notification.hints.urgency),
+                });
+
+                // Broadcast count change
+                let count = {
+                    let store = self.notification_store.lock().await;
+                    store.count()
+                };
+                self.broadcaster.broadcast(&Event::CountChanged { count });
+
                 // Check DND mode before showing popup
                 let should_show = if !self.paused {
                     true
@@ -432,6 +452,14 @@ impl Daemon {
                     "Notification updated: id={} summary=\"{}\"",
                     notification.id, notification.summary
                 );
+
+                // Broadcast event to subscribers
+                self.broadcaster.broadcast(&Event::NotificationUpdated {
+                    id: notification.id,
+                    summary: notification.summary.clone(),
+                    body: notification.body.clone(),
+                });
+
                 // Update popup
                 self.send_ui_command(PopupCommand::Update {
                     id: notification.id,
@@ -440,6 +468,12 @@ impl Daemon {
             }
             NotificationEvent::Closed { id, reason } => {
                 info!("Notification {} closed: reason={:?}", id, reason);
+
+                // Broadcast event to subscribers
+                self.broadcaster.broadcast(&Event::NotificationClosed {
+                    id,
+                    reason: format!("{:?}", reason),
+                });
 
                 // Close popup
                 self.close_notification_popup(id, reason.clone());
@@ -451,6 +485,13 @@ impl Daemon {
                     let mut history = self.history.lock().await;
                     history.push(notification);
                 }
+
+                // Broadcast count change
+                let count = {
+                    let store = self.notification_store.lock().await;
+                    store.count()
+                };
+                self.broadcaster.broadcast(&Event::CountChanged { count });
 
                 // Emit D-Bus signal
                 if let Some(ref dbus) = self.dbus_service {
@@ -573,10 +614,18 @@ impl Daemon {
                     if paused { "enabled" } else { "disabled" },
                     self.pause_level
                 );
+
+                // Broadcast to subscribers
+                self.broadcaster.broadcast(&Event::PausedChanged { paused });
+
                 Response::ok_with_message(format!(
                     "DND {}",
                     if paused { "enabled" } else { "disabled" }
                 ))
+            }
+            Command::Subscribe => {
+                // Subscribe is handled in the IPC layer, shouldn't reach here
+                Response::ok_with_message("Subscribed")
             }
             Command::IsPaused => {
                 let data = serde_json::json!({

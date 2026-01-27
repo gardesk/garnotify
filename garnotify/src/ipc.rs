@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -55,8 +55,43 @@ pub enum Command {
     Reload,
     /// Get daemon status
     Status,
+    /// Subscribe to notification events (keeps connection open)
+    Subscribe,
     /// Quit the daemon
     Quit,
+}
+
+/// Notification events sent to subscribers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum Event {
+    /// New notification created
+    NotificationNew {
+        id: u32,
+        app_name: String,
+        summary: String,
+        body: String,
+        urgency: String,
+    },
+    /// Notification closed
+    NotificationClosed {
+        id: u32,
+        reason: String,
+    },
+    /// Notification updated/replaced
+    NotificationUpdated {
+        id: u32,
+        summary: String,
+        body: String,
+    },
+    /// DND state changed
+    PausedChanged {
+        paused: bool,
+    },
+    /// Count changed (for bar widgets)
+    CountChanged {
+        count: usize,
+    },
 }
 
 /// IPC response
@@ -109,11 +144,28 @@ pub struct IpcRequest {
     pub response_tx: std::sync::mpsc::Sender<Response>,
 }
 
+/// A subscriber connection for streaming events
+pub struct Subscriber {
+    stream: UnixStream,
+}
+
+impl Subscriber {
+    /// Send an event to this subscriber
+    pub fn send(&mut self, event: &Event) -> Result<()> {
+        let json = serde_json::to_string(event)?;
+        writeln!(self.stream, "{}", json)?;
+        self.stream.flush()?;
+        Ok(())
+    }
+}
+
 /// IPC server for the daemon
 pub struct IpcServer {
     socket_path: PathBuf,
     listener: Option<UnixListener>,
     tx: Sender<IpcRequest>,
+    /// Active event subscribers
+    subscribers: std::sync::Arc<std::sync::Mutex<Vec<Subscriber>>>,
 }
 
 impl IpcServer {
@@ -124,8 +176,16 @@ impl IpcServer {
             socket_path: socket_path(),
             listener: None,
             tx,
+            subscribers: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         (server, rx)
+    }
+
+    /// Get a handle for broadcasting events to subscribers
+    pub fn broadcaster(&self) -> EventBroadcaster {
+        EventBroadcaster {
+            subscribers: self.subscribers.clone(),
+        }
     }
 
     /// Start listening for connections
@@ -141,6 +201,7 @@ impl IpcServer {
         info!("IPC server listening on {}", self.socket_path.display());
 
         let tx = self.tx.clone();
+        let subscribers = self.subscribers.clone();
         self.listener = Some(listener.try_clone()?);
 
         // Spawn listener thread
@@ -149,8 +210,9 @@ impl IpcServer {
                 match stream {
                     Ok(stream) => {
                         let tx = tx.clone();
+                        let subscribers = subscribers.clone();
                         thread::spawn(move || {
-                            if let Err(e) = handle_client(stream, tx) {
+                            if let Err(e) = handle_client(stream, tx, subscribers) {
                                 error!("Client error: {}", e);
                             }
                         });
@@ -180,8 +242,47 @@ impl Drop for IpcServer {
     }
 }
 
+/// Handle for broadcasting events to all subscribers
+#[derive(Clone)]
+pub struct EventBroadcaster {
+    subscribers: std::sync::Arc<std::sync::Mutex<Vec<Subscriber>>>,
+}
+
+impl EventBroadcaster {
+    /// Broadcast an event to all subscribers, removing dead connections
+    pub fn broadcast(&self, event: &Event) {
+        let mut subs = match self.subscribers.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // Send to all, track failures
+        let mut failed = Vec::new();
+        for (i, sub) in subs.iter_mut().enumerate() {
+            if sub.send(event).is_err() {
+                failed.push(i);
+            }
+        }
+
+        // Remove failed subscribers (in reverse to preserve indices)
+        for i in failed.into_iter().rev() {
+            subs.remove(i);
+            debug!("Removed dead subscriber");
+        }
+    }
+
+    /// Get current subscriber count
+    pub fn subscriber_count(&self) -> usize {
+        self.subscribers.lock().map(|s| s.len()).unwrap_or(0)
+    }
+}
+
 /// Handle a client connection
-fn handle_client(mut stream: UnixStream, tx: Sender<IpcRequest>) -> Result<()> {
+fn handle_client(
+    mut stream: UnixStream,
+    tx: Sender<IpcRequest>,
+    subscribers: std::sync::Arc<std::sync::Mutex<Vec<Subscriber>>>,
+) -> Result<()> {
     let reader = BufReader::new(stream.try_clone()?);
 
     for line in reader.lines() {
@@ -189,6 +290,40 @@ fn handle_client(mut stream: UnixStream, tx: Sender<IpcRequest>) -> Result<()> {
         debug!("Received: {}", line);
 
         let response = match serde_json::from_str::<Command>(&line) {
+            Ok(Command::Subscribe) => {
+                // Send acknowledgment then add to subscribers
+                let response = Response::ok_with_message("Subscribed to notification events");
+                let response_json = serde_json::to_string(&response)?;
+                writeln!(stream, "{}", response_json)?;
+                stream.flush()?;
+
+                // Add to subscribers list
+                if let Ok(mut subs) = subscribers.lock() {
+                    let sub_stream = stream.try_clone()?;
+                    subs.push(Subscriber { stream: sub_stream });
+                    info!("New subscriber connected, total: {}", subs.len());
+                }
+
+                // Keep connection open - block on read until client disconnects
+                let mut buf = [0u8; 1];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => {
+                            debug!("Subscriber disconnected");
+                            break;
+                        }
+                        Err(_) => {
+                            debug!("Subscriber connection error");
+                            break;
+                        }
+                        Ok(_) => {
+                            // Ignore any data from subscriber (they should only read)
+                        }
+                    }
+                }
+
+                return Ok(());
+            }
             Ok(cmd) => {
                 // Create response channel
                 let (response_tx, response_rx) = mpsc::channel();
