@@ -12,11 +12,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{self, Config};
 use crate::dbus::NotificationsService;
-use crate::ipc::{Command, IpcServer};
+use crate::ipc::{Command, IpcRequest, IpcServer, Response};
 use crate::notification::{
     new_shared_store, CloseReason, History, Notification, NotificationEvent,
     SharedNotificationStore, UrgencyTimeouts,
 };
+use crate::rules::RuleEngine;
 use crate::ui::{PopupCommand, PopupEvent, PopupManager};
 
 /// Get the path to the PID file
@@ -91,16 +92,43 @@ impl Drop for PidGuard {
     }
 }
 
+/// DND pause level
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseLevel {
+    /// Show all notifications (not paused)
+    ShowAll = 0,
+    /// Only show critical notifications
+    CriticalOnly = 1,
+    /// Show no notifications
+    ShowNone = 2,
+}
+
+impl From<u8> for PauseLevel {
+    fn from(level: u8) -> Self {
+        match level {
+            0 => PauseLevel::ShowAll,
+            1 => PauseLevel::CriticalOnly,
+            _ => PauseLevel::ShowNone,
+        }
+    }
+}
+
 /// Daemon state
 pub struct Daemon {
     config: Arc<Config>,
     ipc_server: IpcServer,
-    ipc_rx: Receiver<Command>,
+    ipc_rx: Receiver<IpcRequest>,
     dbus_service: Option<NotificationsService>,
     notification_store: SharedNotificationStore,
     notification_event_rx: tokio::sync::mpsc::Receiver<NotificationEvent>,
     history: Arc<Mutex<History>>,
     running: bool,
+    /// Do Not Disturb mode
+    paused: bool,
+    /// Pause level (0=show all, 1=critical only, 2=show none)
+    pause_level: PauseLevel,
+    /// Rule engine for filtering/modifying notifications
+    rule_engine: RuleEngine,
     /// Channel to send commands to the UI thread
     ui_cmd_tx: Option<std::sync::mpsc::Sender<PopupCommand>>,
     /// Channel to receive events from the UI thread
@@ -131,6 +159,9 @@ impl Daemon {
         // Create history
         let history = Arc::new(Mutex::new(History::new(config.history.max_length)));
 
+        // Create rule engine from config
+        let rule_engine = RuleEngine::with_rules(config.rules.clone());
+
         let config = Arc::new(config);
 
         Ok(Self {
@@ -142,6 +173,9 @@ impl Daemon {
             notification_event_rx: event_rx,
             history,
             running: true,
+            paused: false,
+            pause_level: PauseLevel::ShowAll,
+            rule_engine,
             ui_cmd_tx: None,
             ui_event_rx: None,
             ui_thread: None,
@@ -315,21 +349,52 @@ impl Daemon {
 
     /// Poll for IPC commands
     async fn poll_ipc_commands(&mut self) {
-        while let Ok(cmd) = self.ipc_rx.try_recv() {
-            self.handle_ipc_command(cmd).await;
+        while let Ok(request) = self.ipc_rx.try_recv() {
+            let response = self.handle_ipc_command(request.command).await;
+            // Send response back (ignore error if receiver dropped)
+            let _ = request.response_tx.send(response);
         }
     }
 
     /// Handle a notification event (created, updated, closed)
     async fn handle_notification_event(&mut self, event: NotificationEvent) {
         match event {
-            NotificationEvent::Created(notification) => {
+            NotificationEvent::Created(mut notification) => {
                 info!(
                     "Notification created: id={} summary=\"{}\"",
                     notification.id, notification.summary
                 );
-                // Show popup
-                self.show_notification_popup(notification);
+
+                // Process through rule engine (may modify or suppress)
+                if self.rule_engine.process(&mut notification).is_none() {
+                    debug!(
+                        "Notification {} suppressed by rules",
+                        notification.id
+                    );
+                    return;
+                }
+
+                // Check DND mode before showing popup
+                let should_show = if !self.paused {
+                    true
+                } else {
+                    match self.pause_level {
+                        PauseLevel::ShowAll => true,
+                        PauseLevel::CriticalOnly => {
+                            notification.hints.urgency == crate::notification::Urgency::Critical
+                        }
+                        PauseLevel::ShowNone => false,
+                    }
+                };
+
+                if should_show {
+                    self.show_notification_popup(notification);
+                } else {
+                    debug!(
+                        "Notification {} suppressed by DND (level={:?})",
+                        notification.id, self.pause_level
+                    );
+                }
             }
             NotificationEvent::Updated(notification) => {
                 info!(
@@ -366,28 +431,33 @@ impl Daemon {
         }
     }
 
-    /// Handle an IPC command
-    async fn handle_ipc_command(&mut self, cmd: Command) {
+    /// Handle an IPC command and return a response
+    async fn handle_ipc_command(&mut self, cmd: Command) -> Response {
         debug!("Handling IPC command: {:?}", cmd);
         match cmd {
             Command::Status => {
                 let store = self.notification_store.lock().await;
                 let history = self.history.lock().await;
-                info!(
-                    "Status: running, {} active notifications, {} in history",
-                    store.count(),
-                    history.len()
-                );
+                let status = serde_json::json!({
+                    "running": true,
+                    "active_count": store.count(),
+                    "history_count": history.len(),
+                    "paused": self.paused,
+                    "pause_level": self.pause_level as u8,
+                });
+                Response::ok_with_data(status)
             }
             Command::Reload => {
                 info!("Reloading config via IPC");
-                if let Err(e) = self.handle_reload() {
-                    error!("Failed to reload config: {}", e);
+                match self.handle_reload() {
+                    Ok(_) => Response::ok_with_message("Configuration reloaded"),
+                    Err(e) => Response::error(format!("Failed to reload: {}", e)),
                 }
             }
             Command::Quit => {
                 info!("Quit requested via IPC");
                 self.running = false;
+                Response::ok_with_message("Shutting down")
             }
             Command::Close { id } => {
                 let target_id = if let Some(id) = id {
@@ -400,6 +470,9 @@ impl Daemon {
 
                 if let Some(id) = target_id {
                     info!("Close notification: {}", id);
+                    // Send close command to UI
+                    self.close_notification_popup(id, CloseReason::Closed);
+
                     let mut store = self.notification_store.lock().await;
                     if let Some(notification) = store.remove(id) {
                         let mut history = self.history.lock().await;
@@ -412,12 +485,19 @@ impl Daemon {
                             }
                         }
                     }
+                    Response::ok_with_message(format!("Closed notification {}", id))
+                } else {
+                    Response::ok_with_message("No notifications to close")
                 }
             }
             Command::CloseAll => {
                 info!("Close all notifications");
+                // Send close-all to UI
+                self.send_ui_command(PopupCommand::CloseAll);
+
                 let mut store = self.notification_store.lock().await;
                 let notifications = store.clear();
+                let count = notifications.len();
                 let mut history = self.history.lock().await;
 
                 for notification in notifications {
@@ -431,54 +511,86 @@ impl Daemon {
                         }
                     }
                 }
+                Response::ok_with_message(format!("Closed {} notifications", count))
             }
             Command::HistoryPop => {
-                info!("History pop requested");
                 let mut history = self.history.lock().await;
                 if let Some(notification) = history.pop() {
                     info!(
                         "Popped from history: id={} summary=\"{}\"",
                         notification.id, notification.summary
                     );
-                    // TODO: In sprint 3, re-display the notification
+                    // Re-display the notification
+                    drop(history); // Release lock before showing popup
+                    self.show_notification_popup(notification);
+                    Response::ok_with_message("Restored notification from history")
                 } else {
-                    info!("History is empty");
+                    Response::ok_with_message("History is empty")
                 }
             }
             Command::HistoryClear => {
-                info!("History clear requested");
                 let mut history = self.history.lock().await;
+                let count = history.len();
                 history.clear();
+                Response::ok_with_message(format!("Cleared {} items from history", count))
             }
             Command::SetPaused { paused, level } => {
-                info!("Set paused: {} (level {})", paused, level);
-                // TODO: Implement in sprint 4
+                self.paused = paused;
+                self.pause_level = PauseLevel::from(level);
+                info!(
+                    "DND mode: {} (level {:?})",
+                    if paused { "enabled" } else { "disabled" },
+                    self.pause_level
+                );
+                Response::ok_with_message(format!(
+                    "DND {}",
+                    if paused { "enabled" } else { "disabled" }
+                ))
             }
             Command::IsPaused => {
-                info!("Is paused query");
-                // TODO: Implement in sprint 4
+                let data = serde_json::json!({
+                    "paused": self.paused,
+                    "level": self.pause_level as u8,
+                });
+                Response::ok_with_data(data)
             }
             Command::Count => {
                 let store = self.notification_store.lock().await;
-                info!("Notification count: {}", store.count());
+                let data = serde_json::json!({
+                    "count": store.count(),
+                });
+                Response::ok_with_data(data)
             }
             Command::List => {
                 let store = self.notification_store.lock().await;
-                info!("Active notifications:");
-                for notification in store.list() {
-                    info!(
-                        "  id={} app=\"{}\" summary=\"{}\"",
-                        notification.id, notification.app_name, notification.summary
-                    );
-                }
+                let list: Vec<_> = store
+                    .list()
+                    .iter()
+                    .map(|n| {
+                        serde_json::json!({
+                            "id": n.id,
+                            "app_name": n.app_name,
+                            "summary": n.summary,
+                            "body": n.body,
+                            "urgency": format!("{:?}", n.hints.urgency),
+                        })
+                    })
+                    .collect();
+                Response::ok_with_data(serde_json::json!(list))
             }
             Command::RuleEnable { name } => {
-                info!("Rule enable: {}", name);
-                // TODO: Implement in sprint 4
+                if self.rule_engine.enable_rule(&name) {
+                    Response::ok_with_message(format!("Enabled rule '{}'", name))
+                } else {
+                    Response::error(format!("Rule '{}' not found", name))
+                }
             }
             Command::RuleDisable { name } => {
-                info!("Rule disable: {}", name);
-                // TODO: Implement in sprint 4
+                if self.rule_engine.disable_rule(&name) {
+                    Response::ok_with_message(format!("Disabled rule '{}'", name))
+                } else {
+                    Response::error(format!("Rule '{}' not found", name))
+                }
             }
         }
     }
@@ -488,6 +600,8 @@ impl Daemon {
         match config::load(None) {
             Ok(new_config) => {
                 info!("Reloaded configuration");
+                // Reload rules
+                self.rule_engine = RuleEngine::with_rules(new_config.rules.clone());
                 self.config = Arc::new(new_config);
             }
             Err(e) => {

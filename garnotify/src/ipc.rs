@@ -1,6 +1,7 @@
 //! IPC for garnotify daemon <-> garnotifyctl communication
 //!
-//! Uses Unix domain sockets with JSON protocol.
+//! Uses Unix domain sockets with JSON protocol and oneshot channels
+//! for proper request-response handling.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::Duration;
 use tracing::{debug, error, info};
 
 /// Get the path to the IPC socket
@@ -101,16 +103,22 @@ impl Response {
     }
 }
 
+/// An IPC request wrapping a command with a response channel
+pub struct IpcRequest {
+    pub command: Command,
+    pub response_tx: std::sync::mpsc::Sender<Response>,
+}
+
 /// IPC server for the daemon
 pub struct IpcServer {
     socket_path: PathBuf,
     listener: Option<UnixListener>,
-    tx: Sender<Command>,
+    tx: Sender<IpcRequest>,
 }
 
 impl IpcServer {
     /// Create a new IPC server
-    pub fn new() -> (Self, Receiver<Command>) {
+    pub fn new() -> (Self, Receiver<IpcRequest>) {
         let (tx, rx) = mpsc::channel();
         let server = Self {
             socket_path: socket_path(),
@@ -173,7 +181,7 @@ impl Drop for IpcServer {
 }
 
 /// Handle a client connection
-fn handle_client(mut stream: UnixStream, tx: Sender<Command>) -> Result<()> {
+fn handle_client(mut stream: UnixStream, tx: Sender<IpcRequest>) -> Result<()> {
     let reader = BufReader::new(stream.try_clone()?);
 
     for line in reader.lines() {
@@ -182,11 +190,23 @@ fn handle_client(mut stream: UnixStream, tx: Sender<Command>) -> Result<()> {
 
         let response = match serde_json::from_str::<Command>(&line) {
             Ok(cmd) => {
-                // Forward command to daemon
-                if tx.send(cmd).is_err() {
+                // Create response channel
+                let (response_tx, response_rx) = mpsc::channel();
+
+                // Forward command with response channel to daemon
+                let request = IpcRequest {
+                    command: cmd,
+                    response_tx,
+                };
+
+                if tx.send(request).is_err() {
                     Response::error("Daemon not responding")
                 } else {
-                    Response::ok()
+                    // Wait for response from daemon (with timeout)
+                    match response_rx.recv_timeout(Duration::from_secs(5)) {
+                        Ok(response) => response,
+                        Err(_) => Response::error("Timeout waiting for daemon response"),
+                    }
                 }
             }
             Err(e) => Response::error(format!("Invalid command: {}", e)),
