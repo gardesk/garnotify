@@ -296,31 +296,10 @@ impl NotificationPopup {
         let urgency = &self.notification.hints.urgency;
         let colors = &self.appearance.colors;
 
-        let bg = match urgency {
-            Urgency::Low => Color::from_hex(&colors.low_background)
-                .unwrap_or(Color::new(0.1, 0.1, 0.1, 0.9)),
-            Urgency::Normal => Color::from_hex(&colors.background)
-                .unwrap_or(Color::new(0.12, 0.12, 0.14, 0.95)),
-            Urgency::Critical => Color::from_hex(&colors.critical_background)
-                .unwrap_or(Color::new(0.3, 0.1, 0.1, 0.95)),
-        };
-
-        let fg = match urgency {
-            Urgency::Low => Color::from_hex(&colors.low_foreground)
-                .unwrap_or(Color::new(0.7, 0.7, 0.7, 1.0)),
-            Urgency::Normal => Color::from_hex(&colors.foreground)
-                .unwrap_or(Color::new(0.9, 0.9, 0.9, 1.0)),
-            Urgency::Critical => Color::from_hex(&colors.critical_foreground)
-                .unwrap_or(Color::new(1.0, 0.9, 0.9, 1.0)),
-        };
-
-        let border = match urgency {
-            Urgency::Low => Color::from_hex(&colors.low_border)
-                .unwrap_or(Color::new(0.3, 0.3, 0.3, 0.5)),
-            Urgency::Normal => Color::from_hex(&colors.border)
-                .unwrap_or(Color::new(0.4, 0.4, 0.4, 0.5)),
-            Urgency::Critical => Color::from_hex(&colors.critical_border)
-                .unwrap_or(Color::new(0.8, 0.2, 0.2, 0.8)),
+        let (bg, fg, border) = match urgency {
+            Urgency::Low => (colors.low_background, colors.low_foreground, colors.low_border),
+            Urgency::Normal => (colors.background, colors.foreground, colors.border),
+            Urgency::Critical => (colors.critical_background, colors.critical_foreground, colors.critical_border),
         };
 
         (bg, fg, border)

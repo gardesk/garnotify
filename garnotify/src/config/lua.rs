@@ -3,14 +3,17 @@
 //! Reads `gar.notification` table from `~/.config/gar/init.lua`
 
 use anyhow::{anyhow, Result};
+use gartk_core::Color;
 use mlua::{Lua, Table, Value};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use super::{
-    AnimationConfig, AppearanceConfig, ColorConfig, Config, GeneralConfig,
-    GeometryConfig, HistoryConfig, TimeoutConfig,
-};
+use super::{ColorConfig, Config};
+
+/// Parse a color string from Lua, returning default on failure
+fn parse_color(s: &str, default: Color) -> Color {
+    Color::parse(s).unwrap_or(default)
+}
 
 /// Convert mlua Error to anyhow Error
 fn lua_err(e: mlua::Error) -> anyhow::Error {
@@ -224,16 +227,19 @@ fn parse_notification_config(table: &Table) -> Result<Config> {
 
     // Colors - can be flat or nested
     if let Ok(background) = table.get::<String>("background") {
-        config.appearance.colors.background = background.clone();
-        config.appearance.colors.low_background = background.clone();
+        let color = parse_color(&background, config.appearance.colors.background);
+        config.appearance.colors.background = color;
+        config.appearance.colors.low_background = color;
     }
     if let Ok(foreground) = table.get::<String>("foreground") {
-        config.appearance.colors.foreground = foreground.clone();
-        config.appearance.colors.low_foreground = foreground.clone();
+        let color = parse_color(&foreground, config.appearance.colors.foreground);
+        config.appearance.colors.foreground = color;
+        config.appearance.colors.low_foreground = color;
     }
     if let Ok(border) = table.get::<String>("border") {
-        config.appearance.colors.border = border.clone();
-        config.appearance.colors.low_border = border.clone();
+        let color = parse_color(&border, config.appearance.colors.border);
+        config.appearance.colors.border = color;
+        config.appearance.colors.low_border = color;
     }
 
     // Nested colors table
@@ -280,35 +286,35 @@ fn parse_notification_config(table: &Table) -> Result<Config> {
 /// Parse colors table
 fn parse_colors(table: &Table, colors: &mut ColorConfig) {
     if let Ok(bg) = table.get::<String>("background") {
-        colors.background = bg;
+        colors.background = parse_color(&bg, colors.background);
     }
     if let Ok(fg) = table.get::<String>("foreground") {
-        colors.foreground = fg;
+        colors.foreground = parse_color(&fg, colors.foreground);
     }
     if let Ok(border) = table.get::<String>("border") {
-        colors.border = border;
+        colors.border = parse_color(&border, colors.border);
     }
 
     // Low urgency
     if let Ok(low_bg) = table.get::<String>("low_background") {
-        colors.low_background = low_bg;
+        colors.low_background = parse_color(&low_bg, colors.low_background);
     }
     if let Ok(low_fg) = table.get::<String>("low_foreground") {
-        colors.low_foreground = low_fg;
+        colors.low_foreground = parse_color(&low_fg, colors.low_foreground);
     }
     if let Ok(low_border) = table.get::<String>("low_border") {
-        colors.low_border = low_border;
+        colors.low_border = parse_color(&low_border, colors.low_border);
     }
 
     // Critical urgency
     if let Ok(crit_bg) = table.get::<String>("critical_background") {
-        colors.critical_background = crit_bg;
+        colors.critical_background = parse_color(&crit_bg, colors.critical_background);
     }
     if let Ok(crit_fg) = table.get::<String>("critical_foreground") {
-        colors.critical_foreground = crit_fg;
+        colors.critical_foreground = parse_color(&crit_fg, colors.critical_foreground);
     }
     if let Ok(crit_border) = table.get::<String>("critical_border") {
-        colors.critical_border = crit_border;
+        colors.critical_border = parse_color(&crit_border, colors.critical_border);
     }
 }
 

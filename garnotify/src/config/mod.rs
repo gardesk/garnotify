@@ -3,11 +3,23 @@
 pub mod lua;
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use gartk_core::Color;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
 use crate::rules::Rule;
+
+/// Serialize Color as hex string
+fn serialize_color<S: Serializer>(color: &Color, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&color.to_hex())
+}
+
+/// Deserialize Color from any color string (hex, rgb, rgba, named)
+fn deserialize_color<'de, D: Deserializer<'de>>(d: D) -> Result<Color, D::Error> {
+    let s: String = Deserialize::deserialize(d)?;
+    Color::parse(&s).map_err(de::Error::custom)
+}
 
 /// Get the default configuration file path
 fn config_path() -> PathBuf {
@@ -161,47 +173,56 @@ impl Default for AppearanceConfig {
     }
 }
 
-/// Color configuration
+/// Color configuration using gartk Color type
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorConfig {
     /// Default background color
-    pub background: String,
+    #[serde(serialize_with = "serialize_color", deserialize_with = "deserialize_color")]
+    pub background: Color,
     /// Default foreground (text) color
-    pub foreground: String,
+    #[serde(serialize_with = "serialize_color", deserialize_with = "deserialize_color")]
+    pub foreground: Color,
     /// Default border color
-    pub border: String,
+    #[serde(serialize_with = "serialize_color", deserialize_with = "deserialize_color")]
+    pub border: Color,
 
     /// Low urgency background
-    pub low_background: String,
+    #[serde(serialize_with = "serialize_color", deserialize_with = "deserialize_color")]
+    pub low_background: Color,
     /// Low urgency foreground
-    pub low_foreground: String,
+    #[serde(serialize_with = "serialize_color", deserialize_with = "deserialize_color")]
+    pub low_foreground: Color,
     /// Low urgency border
-    pub low_border: String,
+    #[serde(serialize_with = "serialize_color", deserialize_with = "deserialize_color")]
+    pub low_border: Color,
 
     /// Critical urgency background
-    pub critical_background: String,
+    #[serde(serialize_with = "serialize_color", deserialize_with = "deserialize_color")]
+    pub critical_background: Color,
     /// Critical urgency foreground
-    pub critical_foreground: String,
+    #[serde(serialize_with = "serialize_color", deserialize_with = "deserialize_color")]
+    pub critical_foreground: Color,
     /// Critical urgency border
-    pub critical_border: String,
+    #[serde(serialize_with = "serialize_color", deserialize_with = "deserialize_color")]
+    pub critical_border: Color,
 }
 
 impl Default for ColorConfig {
     fn default() -> Self {
-        // Catppuccin-inspired colors
+        // Catppuccin-inspired colors (matching gartk Theme::dark())
         Self {
-            background: "#1e1e2e".into(),
-            foreground: "#cdd6f4".into(),
-            border: "#45475a".into(),
+            background: Color::from_hex("#1e1e2e").unwrap(),
+            foreground: Color::from_hex("#cdd6f4").unwrap(),
+            border: Color::from_hex("#45475a").unwrap(),
 
-            low_background: "#1e1e2e".into(),
-            low_foreground: "#6c7086".into(),
-            low_border: "#45475a".into(),
+            low_background: Color::from_hex("#1e1e2e").unwrap(),
+            low_foreground: Color::from_hex("#6c7086").unwrap(),
+            low_border: Color::from_hex("#45475a").unwrap(),
 
-            critical_background: "#f38ba8".into(),
-            critical_foreground: "#1e1e2e".into(),
-            critical_border: "#f38ba8".into(),
+            critical_background: Color::from_hex("#f38ba8").unwrap(),
+            critical_foreground: Color::from_hex("#1e1e2e").unwrap(),
+            critical_border: Color::from_hex("#f38ba8").unwrap(),
         }
     }
 }
