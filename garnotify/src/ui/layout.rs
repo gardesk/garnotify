@@ -4,8 +4,8 @@
 //! when multiple notifications are visible.
 
 use gartk_core::Rect;
-use gartk_x11::Connection;
-use tracing::debug;
+use gartk_x11::{Connection, Monitor, detect_monitors, primary_monitor, monitor_at_pointer};
+use tracing::{debug, info, warn};
 
 /// Screen position for notifications
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -57,12 +57,36 @@ pub enum StackDirection {
     Up,
 }
 
+/// Monitor selection mode
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorSelection {
+    /// Use primary monitor
+    Primary,
+    /// Follow mouse pointer
+    Mouse,
+    /// Use specific monitor by name
+    Named(String),
+}
+
+impl MonitorSelection {
+    /// Parse from config string
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "primary" => Self::Primary,
+            "mouse" | "pointer" => Self::Mouse,
+            name => Self::Named(name.to_string()),
+        }
+    }
+}
+
 /// Layout manager for notification popups
 pub struct LayoutManager {
-    /// Screen width
-    screen_width: u32,
-    /// Screen height
-    screen_height: u32,
+    /// Current monitor bounds
+    monitor: Monitor,
+    /// Monitor selection mode
+    monitor_selection: MonitorSelection,
+    /// X11 connection for monitor updates
+    conn: Connection,
     /// Notification width
     notification_width: u32,
     /// Margin from screen edges
@@ -79,18 +103,32 @@ pub struct LayoutManager {
 
 impl LayoutManager {
     /// Create a new layout manager
-    pub fn new(conn: &Connection, width: u32, position: NotificationPosition, max_visible: u32) -> Self {
-        let screen_width = conn.screen_width() as u32;
-        let screen_height = conn.screen_height() as u32;
+    pub fn new(
+        conn: &Connection,
+        width: u32,
+        position: NotificationPosition,
+        max_visible: u32,
+        monitor_config: &str,
+    ) -> Self {
+        let monitor_selection = MonitorSelection::from_str(monitor_config);
+        let monitor = Self::get_target_monitor_static(conn, &monitor_selection);
 
         debug!(
-            "LayoutManager: screen={}x{}, position={}, width={}, max={}",
-            screen_width, screen_height, position, width, max_visible
+            "LayoutManager: monitor='{}' ({}x{} at {},{}) position={}, width={}, max={}",
+            monitor.name,
+            monitor.rect.width,
+            monitor.rect.height,
+            monitor.rect.x,
+            monitor.rect.y,
+            position,
+            width,
+            max_visible
         );
 
         Self {
-            screen_width,
-            screen_height,
+            monitor,
+            monitor_selection,
+            conn: conn.clone(),
             notification_width: width,
             margin: 16,
             gap: 8,
@@ -98,6 +136,62 @@ impl LayoutManager {
             max_visible,
             slots: vec![None; max_visible as usize],
         }
+    }
+
+    /// Get target monitor based on selection mode (static version for construction)
+    fn get_target_monitor_static(conn: &Connection, selection: &MonitorSelection) -> Monitor {
+        match selection {
+            MonitorSelection::Primary => {
+                primary_monitor(conn).unwrap_or_else(|e| {
+                    warn!("Failed to get primary monitor: {}, using fallback", e);
+                    Self::fallback_monitor(conn)
+                })
+            }
+            MonitorSelection::Mouse => {
+                monitor_at_pointer(conn).unwrap_or_else(|e| {
+                    warn!("Failed to get monitor at pointer: {}, using primary", e);
+                    primary_monitor(conn).unwrap_or_else(|_| Self::fallback_monitor(conn))
+                })
+            }
+            MonitorSelection::Named(name) => {
+                detect_monitors(conn)
+                    .ok()
+                    .and_then(|monitors| {
+                        monitors.into_iter().find(|m| m.name == *name)
+                    })
+                    .unwrap_or_else(|| {
+                        warn!("Monitor '{}' not found, using primary", name);
+                        primary_monitor(conn).unwrap_or_else(|_| Self::fallback_monitor(conn))
+                    })
+            }
+        }
+    }
+
+    /// Create a fallback monitor from screen dimensions
+    fn fallback_monitor(conn: &Connection) -> Monitor {
+        Monitor {
+            name: "default".to_string(),
+            rect: Rect::new(0, 0, conn.screen_width() as u32, conn.screen_height() as u32),
+            primary: true,
+            width_mm: 0,
+            height_mm: 0,
+        }
+    }
+
+    /// Update monitor if using mouse-follow mode
+    pub fn update_monitor_if_needed(&mut self) {
+        if self.monitor_selection == MonitorSelection::Mouse {
+            let new_monitor = Self::get_target_monitor_static(&self.conn, &self.monitor_selection);
+            if new_monitor.name != self.monitor.name {
+                info!("Monitor changed: {} -> {}", self.monitor.name, new_monitor.name);
+                self.monitor = new_monitor;
+            }
+        }
+    }
+
+    /// Get current monitor info
+    pub fn monitor(&self) -> &Monitor {
+        &self.monitor
     }
 
     /// Get the stack direction based on position
@@ -155,28 +249,32 @@ impl LayoutManager {
         Rect::new(x, y, self.notification_width, height)
     }
 
-    /// Calculate X position based on screen position
+    /// Calculate X position based on monitor position
     fn calculate_x(&self) -> i32 {
+        let mon = &self.monitor.rect;
         match self.position {
-            NotificationPosition::TopLeft | NotificationPosition::BottomLeft => self.margin as i32,
+            NotificationPosition::TopLeft | NotificationPosition::BottomLeft => {
+                mon.x + self.margin as i32
+            }
             NotificationPosition::TopRight | NotificationPosition::BottomRight => {
-                self.screen_width as i32 - self.notification_width as i32 - self.margin as i32
+                mon.x + mon.width as i32 - self.notification_width as i32 - self.margin as i32
             }
             NotificationPosition::TopCenter | NotificationPosition::BottomCenter => {
-                (self.screen_width as i32 - self.notification_width as i32) / 2
+                mon.x + (mon.width as i32 - self.notification_width as i32) / 2
             }
         }
     }
 
     /// Calculate Y position based on slot and stack direction
     fn calculate_y(&self, slot: usize, height: u32) -> i32 {
+        let mon = &self.monitor.rect;
         // Calculate offset from edge based on slot position
         let slot_offset = self.calculate_slot_offset(slot, height);
 
         match self.stack_direction() {
-            StackDirection::Down => self.margin as i32 + slot_offset,
+            StackDirection::Down => mon.y + self.margin as i32 + slot_offset,
             StackDirection::Up => {
-                self.screen_height as i32 - height as i32 - self.margin as i32 - slot_offset
+                mon.y + mon.height as i32 - height as i32 - self.margin as i32 - slot_offset
             }
         }
     }
