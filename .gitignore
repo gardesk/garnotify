@@ -17,3 +17,6 @@ Thumbs.db
 # Planning docs (kept locally, not in repo)
 docs/roadmap.md
 docs/sprints/
+
+# Tool directories
+.fackr/
