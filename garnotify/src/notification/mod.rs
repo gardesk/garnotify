@@ -6,4 +6,4 @@ mod types;
 
 pub use history::History;
 pub use store::{new_shared_store, NotificationEvent, SharedNotificationStore};
-pub use types::{Action, CloseReason, Hints, Notification, Urgency, UrgencyTimeouts};
+pub use types::{Action, CloseReason, Hints, ImageData, Notification, Urgency, UrgencyTimeouts};
