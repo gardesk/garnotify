@@ -1,0 +1,15 @@
+[Unit]
+Description=garnotify notification daemon
+Documentation=https://github.com/mfwolffe/garnotify
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/garnotify daemon
+Restart=on-failure
+RestartSec=3
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=graphical-session.target
