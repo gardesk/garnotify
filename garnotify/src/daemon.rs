@@ -191,6 +191,34 @@ impl Daemon {
         Ok(())
     }
 
+    /// Initialize history (load from file if persistence is enabled)
+    pub async fn init_history(&mut self) -> Result<()> {
+        if self.config.history.persist {
+            let mut history = self.history.lock().await;
+            match history.load_from_file() {
+                Ok(count) => {
+                    if count > 0 {
+                        info!("Loaded {} notifications from history", count);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to load history: {}", e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Save history to file (if persistence is enabled)
+    async fn save_history(&self) {
+        if self.config.history.persist {
+            let history = self.history.lock().await;
+            if let Err(e) = history.save_to_file() {
+                error!("Failed to save history: {}", e);
+            }
+        }
+    }
+
     /// Initialize D-Bus service
     pub async fn init_dbus(&mut self) -> Result<()> {
         let service = NotificationsService::new(
@@ -283,6 +311,9 @@ impl Daemon {
                 }
             }
         }
+
+        // Save history before shutdown
+        self.save_history().await;
 
         // Clean up UI thread
         if let Some(tx) = self.ui_cmd_tx.take() {
@@ -634,6 +665,10 @@ pub async fn run(config_path: Option<String>, _foreground: bool) -> Result<()> {
         .await
         .context("Failed to initialize D-Bus")?;
     daemon.init_ui().context("Failed to initialize UI")?;
+    daemon
+        .init_history()
+        .await
+        .context("Failed to initialize history")?;
     daemon.run().await
 }
 

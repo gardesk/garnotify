@@ -81,7 +81,7 @@ impl Action {
 }
 
 /// Parsed notification hints
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Hints {
     /// Urgency level (0=low, 1=normal, 2=critical)
     pub urgency: Urgency,
@@ -91,7 +91,8 @@ pub struct Hints {
     pub desktop_entry: Option<String>,
     /// Path to image file
     pub image_path: Option<String>,
-    /// Raw image data
+    /// Raw image data (not persisted - too large)
+    #[serde(skip)]
     pub image_data: Option<ImageData>,
     /// Path to sound file to play
     pub sound_file: Option<String>,
@@ -208,7 +209,7 @@ impl Hints {
 }
 
 /// A desktop notification
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Notification {
     /// Unique notification ID
     pub id: u32,
@@ -228,7 +229,8 @@ pub struct Notification {
     pub hints: Hints,
     /// Expiration timeout in milliseconds (-1 = default, 0 = never)
     pub expire_timeout: i32,
-    /// When the notification was created
+    /// When the notification was created (not persisted)
+    #[serde(skip, default = "Instant::now")]
     pub created_at: Instant,
 }
 

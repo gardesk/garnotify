@@ -1,9 +1,20 @@
 //! Notification history management
 
 use std::collections::VecDeque;
-use tracing::debug;
+use std::fs;
+use std::io::{BufReader, BufWriter};
+use std::path::PathBuf;
+use tracing::{debug, info, warn};
 
 use super::types::Notification;
+
+/// Get the history file path
+fn history_file_path() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+        .join("garnotify")
+        .join("history.json")
+}
 
 /// Notification history with circular buffer
 pub struct History {
@@ -87,6 +98,58 @@ impl History {
     /// Get items as a vector (most recent first)
     pub fn list_recent_first(&self) -> Vec<&Notification> {
         self.items.iter().rev().collect()
+    }
+
+    /// Load history from file
+    pub fn load_from_file(&mut self) -> Result<usize, std::io::Error> {
+        let path = history_file_path();
+
+        if !path.exists() {
+            debug!("No history file found at {}", path.display());
+            return Ok(0);
+        }
+
+        let file = fs::File::open(&path)?;
+        let reader = BufReader::new(file);
+
+        let items: Vec<Notification> = serde_json::from_reader(reader)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let count = items.len();
+
+        // Only keep up to max_length items
+        self.items = items
+            .into_iter()
+            .rev() // Reverse because we want most recent at back
+            .take(self.max_length)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev() // Reverse back to original order
+            .collect();
+
+        info!("Loaded {} notifications from history file", self.items.len());
+        Ok(count)
+    }
+
+    /// Save history to file
+    pub fn save_to_file(&self) -> Result<(), std::io::Error> {
+        let path = history_file_path();
+
+        // Create parent directory if needed
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let file = fs::File::create(&path)?;
+        let writer = BufWriter::new(file);
+
+        // Save as array (oldest first, matching internal order)
+        let items: Vec<&Notification> = self.items.iter().collect();
+        serde_json::to_writer_pretty(writer, &items)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        info!("Saved {} notifications to history file", self.items.len());
+        Ok(())
     }
 }
 

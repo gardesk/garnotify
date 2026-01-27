@@ -245,7 +245,7 @@ impl Default for HistoryConfig {
     fn default() -> Self {
         Self {
             max_length: 100,
-            persist: false,
+            persist: true,
         }
     }
 }
