@@ -667,6 +667,11 @@ fn run_ui_thread(
         if let Err(e) = manager.poll_events() {
             error!("Failed to poll X11 events: {}", e);
         }
+
+        // Update animations
+        if let Err(e) = manager.update_animations() {
+            error!("Failed to update animations: {}", e);
+        }
     }
 
     Ok(())

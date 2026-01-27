@@ -12,6 +12,7 @@ use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
 
 use crate::config::AppearanceConfig;
 use crate::notification::{Notification, Urgency};
+use super::animation::{AnimationConfig, AnimationState, Animator};
 use super::icons::{load_notification_icon, LoadedIcon};
 
 /// Default notification height (will be calculated based on content)
@@ -57,6 +58,8 @@ pub struct NotificationPopup {
     action_bounds: Vec<Rect>,
     /// Index of currently hovered action button (None if no button hovered)
     hovered_action: Option<usize>,
+    /// Animation controller
+    animator: Animator,
 }
 
 impl NotificationPopup {
@@ -66,6 +69,7 @@ impl NotificationPopup {
         notification: Notification,
         rect: Rect,
         appearance: &AppearanceConfig,
+        animation_config: AnimationConfig,
     ) -> Result<Self> {
         // Create ARGB window for transparency
         let window = Window::create(
@@ -93,6 +97,9 @@ impl NotificationPopup {
         // Load icon
         let icon = load_notification_icon(&notification, appearance.icon_size);
 
+        // Create animator with target position
+        let animator = Animator::new(animation_config, rect.x, rect.y);
+
         info!(
             "Created popup window {} for notification {} at ({}, {}) with icon: {}",
             window.id(),
@@ -114,6 +121,7 @@ impl NotificationPopup {
             icon,
             action_bounds: Vec::new(),
             hovered_action: None,
+            animator,
         })
     }
 
@@ -142,8 +150,15 @@ impl NotificationPopup {
         Ok(())
     }
 
-    /// Show the popup window
+    /// Show the popup window with appear animation
     pub fn show(&mut self) -> Result<()> {
+        // Start appear animation
+        self.animator.start_appear();
+
+        // Get initial animated position
+        let (x, y) = self.animator.current_position();
+        self.move_to_internal(x, y)?;
+
         self.render()?;
         self.window.map()?;
         self.present()?;
@@ -152,7 +167,7 @@ impl NotificationPopup {
         Ok(())
     }
 
-    /// Hide the popup window
+    /// Hide the popup window (immediately, no animation)
     pub fn hide(&self) -> Result<()> {
         self.window.unmap()?;
         self.conn.flush()?;
@@ -160,15 +175,85 @@ impl NotificationPopup {
         Ok(())
     }
 
-    /// Move the popup to a new position
+    /// Start the disappear animation
+    pub fn start_disappear(&mut self) {
+        self.animator.start_disappear();
+        debug!("Starting disappear animation for notification {}", self.notification.id);
+    }
+
+    /// Update the animation state, returns true if animation is still in progress
+    /// Also updates window position based on animation
+    pub fn update_animation(&mut self) -> Result<bool> {
+        let animating = self.animator.update();
+
+        if self.animator.is_animating() {
+            // Update window position based on animation
+            let (x, y) = self.animator.current_position();
+            self.move_to_internal(x, y)?;
+        }
+
+        // If animation just finished appearing, make sure we're at target
+        if self.animator.state() == AnimationState::Visible {
+            let (target_x, target_y) = self.animator.target_position();
+            if self.rect.x != target_x || self.rect.y != target_y {
+                self.move_to_internal(target_x, target_y)?;
+            }
+        }
+
+        Ok(animating)
+    }
+
+    /// Get current animation state
+    pub fn animation_state(&self) -> AnimationState {
+        self.animator.state()
+    }
+
+    /// Check if popup is currently animating
+    pub fn is_animating(&self) -> bool {
+        self.animator.is_animating()
+    }
+
+    /// Move the popup to a new target position (updates animator target)
     pub fn move_to(&mut self, x: i32, y: i32) -> Result<()> {
-        self.rect.x = x;
-        self.rect.y = y;
-        self.conn.inner().configure_window(
-            self.window.id(),
-            &x11rb::protocol::xproto::ConfigureWindowAux::new().x(x).y(y),
-        )?;
-        self.conn.flush()?;
+        self.animator.set_target_position(x, y);
+
+        // If not animating, move immediately
+        if !self.animator.is_animating() {
+            self.move_to_internal(x, y)?;
+        }
+        Ok(())
+    }
+
+    /// Start a reflow animation to move to a new position
+    pub fn start_reflow(&mut self, new_x: i32, new_y: i32) {
+        self.animator.start_reflow(self.rect.x, self.rect.y, new_x, new_y);
+        debug!(
+            "Starting reflow animation for notification {} from ({}, {}) to ({}, {})",
+            self.notification.id, self.rect.x, self.rect.y, new_x, new_y
+        );
+    }
+
+    /// Get current position
+    pub fn position(&self) -> (i32, i32) {
+        (self.rect.x, self.rect.y)
+    }
+
+    /// Get notification height
+    pub fn height(&self) -> u32 {
+        self.rect.height
+    }
+
+    /// Internal move without updating animator
+    fn move_to_internal(&mut self, x: i32, y: i32) -> Result<()> {
+        if self.rect.x != x || self.rect.y != y {
+            self.rect.x = x;
+            self.rect.y = y;
+            self.conn.inner().configure_window(
+                self.window.id(),
+                &x11rb::protocol::xproto::ConfigureWindowAux::new().x(x).y(y),
+            )?;
+            self.conn.flush()?;
+        }
         Ok(())
     }
 

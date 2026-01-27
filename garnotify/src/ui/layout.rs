@@ -234,6 +234,31 @@ impl LayoutManager {
         }
     }
 
+    /// Compact slots after a notification is removed.
+    /// Returns a list of (notification_id, old_slot, new_slot) for notifications that moved.
+    pub fn compact_slots(&mut self) -> Vec<(u32, usize, usize)> {
+        let mut moves = Vec::new();
+        let mut write_idx = 0;
+
+        for read_idx in 0..self.slots.len() {
+            if let Some(notification_id) = self.slots[read_idx] {
+                if write_idx != read_idx {
+                    // This notification needs to move
+                    moves.push((notification_id, read_idx, write_idx));
+                    self.slots[write_idx] = Some(notification_id);
+                    self.slots[read_idx] = None;
+                }
+                write_idx += 1;
+            }
+        }
+
+        if !moves.is_empty() {
+            debug!("Compacted slots: {:?}", moves);
+        }
+
+        moves
+    }
+
     /// Get the slot index for a notification
     pub fn get_slot(&self, notification_id: u32) -> Option<usize> {
         self.slots

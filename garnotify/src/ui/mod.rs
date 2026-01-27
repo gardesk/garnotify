@@ -3,11 +3,13 @@
 //! Handles X11 window creation, Cairo rendering, and mouse interaction
 //! for notification popups.
 
+mod animation;
 mod icons;
 mod layout;
 mod popup;
 mod popup_manager;
 
+pub use animation::{AnimationConfig, AnimationState, Animator, SlideDirection};
 pub use icons::{load_notification_icon, LoadedIcon};
 pub use layout::{LayoutManager, NotificationPosition, StackDirection};
 pub use popup::NotificationPopup;

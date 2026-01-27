@@ -13,6 +13,7 @@ use x11rb::protocol::Event as X11Event;
 
 use crate::config::Config;
 use crate::notification::{CloseReason, Notification};
+use crate::ui::animation::{AnimationConfig, AnimationState};
 use crate::ui::layout::{LayoutManager, NotificationPosition};
 use crate::ui::popup::{calculate_notification_height, NotificationPopup};
 use crate::ui::{PopupCommand, PopupEvent};
@@ -31,6 +32,8 @@ pub struct PopupManager {
     event_tx: mpsc::Sender<PopupEvent>,
     /// Window ID to notification ID mapping
     window_to_notification: HashMap<u32, u32>,
+    /// Pending close reasons for popups with disappear animations
+    pending_close: HashMap<u32, CloseReason>,
 }
 
 impl PopupManager {
@@ -59,6 +62,7 @@ impl PopupManager {
             popups: HashMap::new(),
             event_tx,
             window_to_notification: HashMap::new(),
+            pending_close: HashMap::new(),
         })
     }
 
@@ -111,12 +115,16 @@ impl PopupManager {
         // Get geometry from layout
         let rect = self.layout.calculate_geometry(slot, height);
 
+        // Create animation config from app config
+        let animation_config = AnimationConfig::from_config(&self.config.animation);
+
         // Create popup window
         let mut popup = NotificationPopup::new(
             self.conn.clone(),
             notification,
             rect,
             &self.config.appearance,
+            animation_config,
         )?;
 
         // Track window ID mapping
@@ -149,24 +157,69 @@ impl PopupManager {
         Ok(())
     }
 
-    /// Close a notification popup
+    /// Close a notification popup (starts disappear animation)
     fn close_notification(&mut self, id: u32, reason: CloseReason) -> Result<()> {
+        if let Some(popup) = self.popups.get_mut(&id) {
+            // Check if already closing
+            if self.pending_close.contains_key(&id) {
+                return Ok(());
+            }
+
+            // Release the slot immediately so other notifications can use it
+            self.layout.release_slot(id);
+
+            // Start disappear animation
+            popup.start_disappear();
+
+            // Track the close reason
+            self.pending_close.insert(id, reason);
+
+            info!("Closing notification {}: reason={:?}", id, reason);
+        }
+        Ok(())
+    }
+
+    /// Immediately remove a popup (after animation completes)
+    fn finish_close(&mut self, id: u32) {
         if let Some(popup) = self.popups.remove(&id) {
             // Remove window mapping
             self.window_to_notification.remove(&popup.window_id());
 
-            // Release the slot
-            self.layout.release_slot(id);
+            // Get the close reason
+            let reason = self.pending_close.remove(&id).unwrap_or(CloseReason::Closed);
 
-            // Hide and drop the popup (window destroyed on drop)
-            popup.hide()?;
+            // Hide the popup
+            let _ = popup.hide();
 
-            info!("Closed notification {}: reason={:?}", id, reason);
+            info!("Finished closing notification {}: reason={:?}", id, reason);
 
             // Send event back to daemon
             let _ = self.event_tx.try_send(PopupEvent::Closed { id, reason });
+
+            // Compact slots and trigger reflow animations for moved notifications
+            self.reflow_stack();
         }
-        Ok(())
+    }
+
+    /// Compact the notification stack and animate notifications to new positions
+    fn reflow_stack(&mut self) {
+        let moves = self.layout.compact_slots();
+
+        for (notification_id, _old_slot, new_slot) in moves {
+            if let Some(popup) = self.popups.get_mut(&notification_id) {
+                // Calculate new geometry for the new slot
+                let height = popup.height();
+                let new_rect = self.layout.calculate_geometry(new_slot, height);
+
+                // Start reflow animation
+                popup.start_reflow(new_rect.x, new_rect.y);
+
+                debug!(
+                    "Reflowing notification {} to slot {} at ({}, {})",
+                    notification_id, new_slot, new_rect.x, new_rect.y
+                );
+            }
+        }
     }
 
     /// Close all notification popups
@@ -274,5 +327,31 @@ impl PopupManager {
     /// Get the number of active popups
     pub fn popup_count(&self) -> usize {
         self.popups.len()
+    }
+
+    /// Update all animations, returns true if any are still animating
+    pub fn update_animations(&mut self) -> Result<bool> {
+        use crate::ui::animation::AnimationState;
+
+        let mut any_animating = false;
+        let mut to_finish = Vec::new();
+
+        for (&id, popup) in &mut self.popups {
+            if popup.update_animation()? {
+                any_animating = true;
+            }
+
+            // Check if disappear animation finished
+            if popup.animation_state() == AnimationState::Hidden {
+                to_finish.push(id);
+            }
+        }
+
+        // Clean up popups that finished disappearing
+        for id in to_finish {
+            self.finish_close(id);
+        }
+
+        Ok(any_animating)
     }
 }
