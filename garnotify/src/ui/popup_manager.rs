@@ -8,7 +8,7 @@ use gartk_x11::Connection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use x11rb::protocol::Event as X11Event;
 
 use crate::config::Config;
@@ -234,8 +234,8 @@ impl PopupManager {
                 if let Some(&id) = self.window_to_notification.get(&e.event) {
                     if let Some(popup) = self.popups.get_mut(&id) {
                         popup.on_leave();
-                        // Re-render to clear hover effects
-                        if let Err(e) = popup.render() {
+                        // Re-render and present to clear hover effects
+                        if let Err(e) = popup.render_and_present() {
                             warn!("Failed to re-render on leave: {}", e);
                         }
                     }
@@ -244,9 +244,9 @@ impl PopupManager {
             X11Event::MotionNotify(e) => {
                 if let Some(&id) = self.window_to_notification.get(&e.event) {
                     if let Some(popup) = self.popups.get_mut(&id) {
-                        // Update hover state, re-render if changed
+                        // Update hover state, re-render and present if changed
                         if popup.on_motion(e.event_x as i32, e.event_y as i32) {
-                            if let Err(err) = popup.render() {
+                            if let Err(err) = popup.render_and_present() {
                                 warn!("Failed to re-render on motion: {}", err);
                             }
                         }

@@ -199,6 +199,13 @@ impl NotificationPopup {
         Ok(())
     }
 
+    /// Render and present to window (for updates like hover effects)
+    pub fn render_and_present(&mut self) -> Result<()> {
+        self.render()?;
+        self.present()?;
+        Ok(())
+    }
+
     /// Get colors based on notification urgency
     fn get_urgency_colors(&self) -> (Color, Color, Color) {
         let urgency = &self.notification.hints.urgency;
