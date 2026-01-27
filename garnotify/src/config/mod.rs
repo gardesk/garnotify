@@ -1,8 +1,11 @@
 //! Configuration loading and management for garnotify
 
+pub mod lua;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tracing::{debug, info, warn};
 
 use crate::rules::Rule;
 
@@ -251,19 +254,57 @@ impl Default for HistoryConfig {
 }
 
 /// Load configuration from file
+///
+/// Priority:
+/// 1. Explicit path (if provided)
+/// 2. gar's Lua config: ~/.config/gar/init.lua (gar.notification table)
+/// 3. TOML config: ~/.config/garnotify/config.toml
+/// 4. Defaults
 pub fn load(path: Option<&str>) -> Result<Config> {
-    let config_path = path.map(PathBuf::from).unwrap_or_else(config_path);
-
-    if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
-
-        let config: Config = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
-
-        Ok(config)
-    } else {
-        // Config file doesn't exist, use defaults
-        Ok(Config::default())
+    // If explicit path provided, use it
+    if let Some(p) = path {
+        let config_path = PathBuf::from(p);
+        if config_path.exists() {
+            return load_toml(&config_path);
+        }
     }
+
+    // Try gar's Lua config first (gar ecosystem integration)
+    let lua_path = lua::gar_config_path();
+    if lua_path.exists() {
+        match lua::load_from_lua(&lua_path) {
+            Ok(Some(config)) => {
+                info!("Loaded config from gar's init.lua");
+                return Ok(config);
+            }
+            Ok(None) => {
+                debug!("No gar.notification table in init.lua");
+            }
+            Err(e) => {
+                warn!("Failed to load Lua config: {}", e);
+            }
+        }
+    }
+
+    // Try TOML config
+    let toml_path = config_path();
+    if toml_path.exists() {
+        return load_toml(&toml_path);
+    }
+
+    // Use defaults
+    debug!("Using default configuration");
+    Ok(Config::default())
+}
+
+/// Load config from TOML file
+fn load_toml(path: &PathBuf) -> Result<Config> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+
+    let config: Config = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+
+    info!("Loaded config from {}", path.display());
+    Ok(config)
 }
