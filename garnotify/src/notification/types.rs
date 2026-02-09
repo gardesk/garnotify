@@ -285,6 +285,23 @@ impl Notification {
     }
 }
 
+impl Default for Notification {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            app_name: String::new(),
+            replaces_id: 0,
+            app_icon: String::new(),
+            summary: String::new(),
+            body: String::new(),
+            actions: Vec::new(),
+            hints: Hints::default(),
+            expire_timeout: -1,
+            created_at: Instant::now(),
+        }
+    }
+}
+
 /// Timeout configuration per urgency level
 #[derive(Debug, Clone)]
 pub struct UrgencyTimeouts {
