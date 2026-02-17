@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "gartk-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -824,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "gartk-render"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "cairo-rs",
  "gartk-core",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "gartk-x11"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "gartk-core",
  "thiserror 2.0.18",
